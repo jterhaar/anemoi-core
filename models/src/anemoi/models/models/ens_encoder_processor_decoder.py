@@ -56,7 +56,7 @@ class AnemoiEnsModelEncProcDec(AnemoiModelEncProcDec):
     def _calculate_input_dim(self, dataset_name: str) -> int:
         base_input_dim = super()._calculate_input_dim(dataset_name)
         base_input_dim += 1  # for forecast step (fcstep)
-        if self.condition_on_residual:
+        if self.condition_on_residual and self.use_residual[dataset_name]:
             base_input_dim += self.num_input_channels_prognostic[dataset_name]
         return base_input_dim
 
@@ -73,12 +73,15 @@ class AnemoiEnsModelEncProcDec(AnemoiModelEncProcDec):
         node_attributes_data = self.node_attributes(dataset_name, batch_size=batch_ens_size)
         grid_shard_shapes = grid_shard_shapes[dataset_name] if grid_shard_shapes is not None else None
 
-        x_skip = self.residual[dataset_name](
-            x,
-            grid_shard_shapes=grid_shard_shapes,
-            model_comm_group=model_comm_group,
-            n_step_output=self.n_step_output,
-        )
+        if self.use_residual[dataset_name]:
+            x_skip = self.residual[dataset_name](
+                x,
+                grid_shard_shapes=grid_shard_shapes,
+                model_comm_group=model_comm_group,
+                n_step_output=self.n_step_output,
+            )
+        else:
+            x_skip = None
 
         if grid_shard_shapes is not None:
             shard_shapes_nodes = get_or_apply_shard_shapes(
@@ -86,24 +89,25 @@ class AnemoiEnsModelEncProcDec(AnemoiModelEncProcDec):
             )
             node_attributes_data = shard_tensor(node_attributes_data, 0, shard_shapes_nodes, model_comm_group)
 
-        # add data positional info (lat/lon)
-        x_data_latent = torch.cat(
-            (
-                einops.rearrange(x, "batch time ensemble grid vars -> (batch ensemble grid) (time vars)"),
-                node_attributes_data,
-                torch.ones(batch_ens_size * x.shape[3], device=x.device).unsqueeze(-1) * fcstep,
-            ),
-            dim=-1,  # feature dimension
-        )
-
-        if self.condition_on_residual:
-            x_skip_cond = x_skip[:, 0] if x_skip.ndim == 5 else x_skip
+        if self.condition_on_residual and x_skip is not None:
+            # add data positional info (lat/lon)
             x_data_latent = torch.cat(
                 (
-                    x_data_latent,
-                    einops.rearrange(x_skip_cond, "bse grid vars -> (bse grid) vars"),
+                    einops.rearrange(x, "batch time ensemble grid vars -> (batch ensemble grid) (time vars)"),
+                    einops.rearrange(x_skip[..., self._internal_input_idx[dataset_name]], "batch ensemble grid vars -> (batch ensemble grid) vars"),
+                    node_attributes_data,
+                    torch.ones(batch_ens_size * x.shape[3], device=x.device).unsqueeze(-1) * fcstep,
                 ),
-                dim=-1,
+                dim=-1,  # feature dimension
+            )
+        else:
+            x_data_latent = torch.cat(
+                (
+                    einops.rearrange(x, "batch time ensemble grid vars -> (batch ensemble grid) (time vars)"),
+                    node_attributes_data,
+                    torch.ones(batch_ens_size * x.shape[3], device=x.device).unsqueeze(-1) * fcstep,
+                ),
+                dim=-1,  # feature dimension
             )
 
         shard_shapes_data = get_or_apply_shard_shapes(
@@ -123,15 +127,7 @@ class AnemoiEnsModelEncProcDec(AnemoiModelEncProcDec):
     ):
         ensemble_size = batch_ens_size // batch_size
         x_out = (
-            einops.rearrange(
-                x_out,
-                "(bs e n) (time vars) -> bs time e n vars",
-                bs=batch_size,
-                e=ensemble_size,
-                time=self.n_step_output,
-            )
-            .to(dtype=dtype)
-            .clone()
+            einops.rearrange(x_out, "(bs e n) f -> bs e n f", bs=batch_size, e=ensemble_size).to(dtype=dtype).clone()
         )
 
         # residual connection (just for the prognostic variables)
@@ -140,7 +136,8 @@ class AnemoiEnsModelEncProcDec(AnemoiModelEncProcDec):
         assert (
             x_skip.shape[1] == x_out.shape[1]
         ), f"Residual time dimension ({x_skip.shape[1]}) must match output time dimension ({x_out.shape[1]})."
-        x_out[..., self._internal_output_idx[dataset_name]] += x_skip[..., self._internal_input_idx[dataset_name]]
+        if self.use_residual[dataset_name]:
+            x_out[..., self._internal_output_idx[dataset_name]] += x_skip[..., self._internal_input_idx[dataset_name]]
 
         for bounding in self.boundings[dataset_name]:
             # bounding performed in the order specified in the config file
@@ -176,8 +173,8 @@ class AnemoiEnsModelEncProcDec(AnemoiModelEncProcDec):
         torch.Tensor
             Output tensor
         """
-        dataset_names = list(x.keys())
-
+        dataset_names = self._graph_names_data
+        
         # Extract and validate batch & ensemble sizes across datasets
         batch_size = self._get_consistent_dim(x, 0)
         ensemble_size = self._get_consistent_dim(x, 2)
@@ -211,28 +208,29 @@ class AnemoiEnsModelEncProcDec(AnemoiModelEncProcDec):
             x_skip_dict[dataset_name] = x_skip
             shard_shapes_data_dict[dataset_name] = shard_shapes_data
 
-            encoder_edge_attr, encoder_edge_index, enc_edge_shard_shapes = self.encoder_graph_provider[
-                dataset_name
-            ].get_edges(
-                batch_size=batch_ens_size,
-                model_comm_group=model_comm_group,
-            )
+            if self.use_encoder[dataset_name]:
+                encoder_edge_attr, encoder_edge_index, enc_edge_shard_shapes = self.encoder_graph_provider[
+                    dataset_name
+                ].get_edges(
+                    batch_size=batch_ens_size,
+                    model_comm_group=model_comm_group,
+                )
 
-            # Encoder for this dataset
-            x_data_latent, x_latent = self.encoder[dataset_name](
-                (x_data_latent, x_hidden_latent),
-                batch_size=batch_ens_size,
-                shard_shapes=(shard_shapes_data_dict[dataset_name], shard_shapes_hidden),
-                edge_attr=encoder_edge_attr,
-                edge_index=encoder_edge_index,
-                model_comm_group=model_comm_group,
-                x_src_is_sharded=in_out_sharded[dataset_name],  # x_data_latent comes sharded iff in_out_sharded
-                x_dst_is_sharded=False,  # x_latent does not come sharded
-                keep_x_dst_sharded=True,  # always keep x_latent sharded for the processor
-                edge_shard_shapes=enc_edge_shard_shapes,
-            )
+                # Encoder for this dataset
+                x_data_latent, x_latent = self.encoder[dataset_name](
+                    (x_data_latent, x_hidden_latent),
+                    batch_size=batch_ens_size,
+                    shard_shapes=(shard_shapes_data_dict[dataset_name], shard_shapes_hidden),
+                    edge_attr=encoder_edge_attr,
+                    edge_index=encoder_edge_index,
+                    model_comm_group=model_comm_group,
+                    x_src_is_sharded=in_out_sharded[dataset_name],  # x_data_latent comes sharded iff in_out_sharded
+                    x_dst_is_sharded=False,  # x_latent does not come sharded
+                    keep_x_dst_sharded=True,  # always keep x_latent sharded for the processor
+                    edge_shard_shapes=enc_edge_shard_shapes,
+                )
+                dataset_latents[dataset_name] = x_latent
             x_data_latent_dict[dataset_name] = x_data_latent
-            dataset_latents[dataset_name] = x_latent
 
         # Combine all dataset latents
         x_latent = sum(dataset_latents.values())
@@ -264,39 +262,46 @@ class AnemoiEnsModelEncProcDec(AnemoiModelEncProcDec):
             **processor_kwargs,
         )
 
-        if self.latent_skip:
-            x_latent = x_latent_proc + x_latent
+        x_latent_proc = x_latent_proc + x_latent
+
+        # Compute decoder edges using updated latent representation
+        decoder_edge_attr, decoder_edge_index, dec_edge_shard_shapes = self.decoder_graph_provider[dataset_name].get_edges(
+            batch_size=batch_ens_size,
+            model_comm_group=model_comm_group,
+        )
+
 
         x_out_dict = {}
         for dataset_name in dataset_names:
-            # Compute decoder edges using updated latent representation
-            decoder_edge_attr, decoder_edge_index, dec_edge_shard_shapes = self.decoder_graph_provider[
-                dataset_name
-            ].get_edges(
-                batch_size=batch_ens_size,
-                model_comm_group=model_comm_group,
-            )
+            if dataset_name in self.outputs: #TODO: loop over self.outputs (consistency assert somewhere?)
+                # Compute decoder edges using updated latent representation
+                decoder_edge_attr, decoder_edge_index, dec_edge_shard_shapes = self.decoder_graph_provider[
+                    dataset_name
+                ].get_edges(
+                    batch_size=batch_ens_size,
+                    model_comm_group=model_comm_group,
+                )
 
-            x_out = self.decoder[dataset_name](
-                (x_latent, x_data_latent_dict[dataset_name]),
-                batch_size=batch_ens_size,
-                shard_shapes=(shard_shapes_hidden, shard_shapes_data_dict[dataset_name]),
-                edge_attr=decoder_edge_attr,
-                edge_index=decoder_edge_index,
-                model_comm_group=model_comm_group,
-                x_src_is_sharded=True,  # x_latent always comes sharded
-                x_dst_is_sharded=in_out_sharded[dataset_name],  # x_data_latent comes sharded iff in_out_sharded
-                keep_x_dst_sharded=in_out_sharded[dataset_name],  # keep x_out sharded iff in_out_sharded
-                edge_shard_shapes=dec_edge_shard_shapes,
-            )
+                x_out = self.decoder[dataset_name](
+                    (x_latent_proc, x_data_latent_dict[dataset_name]),
+                    batch_size=batch_ens_size,
+                    shard_shapes=(shard_shapes_hidden, shard_shapes_data_dict[dataset_name]),
+                    edge_attr=decoder_edge_attr,
+                    edge_index=decoder_edge_index,
+                    model_comm_group=model_comm_group,
+                    x_src_is_sharded=True,  # x_latent always comes sharded
+                    x_dst_is_sharded=in_out_sharded[dataset_name],  # x_data_latent comes sharded iff in_out_sharded
+                    keep_x_dst_sharded=in_out_sharded[dataset_name],  # keep x_out sharded iff in_out_sharded
+                    edge_shard_shapes=dec_edge_shard_shapes,
+                )
 
-            x_out_dict[dataset_name] = self._assemble_output(
-                x_out,
-                x_skip_dict[dataset_name],
-                batch_size,
-                batch_ens_size,
-                dtype=x[dataset_name].dtype,
-                dataset_name=dataset_name,
-            )
+                x_out_dict[dataset_name] = self._assemble_output(
+                    x_out,
+                    x_skip_dict[dataset_name],
+                    batch_size,
+                    batch_ens_size,
+                    dtype=x[dataset_name].dtype,
+                    dataset_name=dataset_name,
+                )
 
         return x_out_dict
