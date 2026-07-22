@@ -248,16 +248,27 @@ class AnemoiTrainer(ABC):
                 and "GLU" in self.config.model.processor.layer_kernels["Activation"]["_target_"]
                 and ".Transformer" in self.config.model.processor.target_
             )
-            and not (
-                "GLU" in self.config.model.encoder.layer_kernels["Activation"]["_target_"]
-                and ".Transformer" in self.config.model.encoder.target_
-            )
-            and not (
-                "GLU" in self.config.model.decoder.layer_kernels["Activation"]["_target_"]
-                and ".Transformer" in self.config.model.decoder.target_
-            )
-        ), "GLU activation function is not supported in Transformer models, due to fixed dimensions. "
-        "Please use a different activation function."
+        ), ("GLU activation function is not supported in Transformer models, due to fixed dimensions. "
+        "Please use a different activation function for processor.")
+
+        for name, encoder_config in self.config.model.encoder.datasets.items():
+            assert (
+                encoder_config.use_encoder == False
+                or not (
+                    "GLU" in encoder_config.encoder_module.layer_kernels["Activation"]["_target_"]
+                    and ".Transformer" in encoder_config.encoder_module.target_
+                )
+            ), ("GLU activation function is not supported in Transformer models, due to fixed dimensions. "
+            f"Please use a different activation function for {name} encoder.")
+
+        for name, decoder_config in self.config.model.decoder.datasets.items():
+            assert (
+                not (
+                    "GLU" in decoder_config.decoder_module.layer_kernels["Activation"]["_target_"]
+                    and ".Transformer" in decoder_config.decoder_module.target_
+                )
+            ), ("GLU activation function is not supported in Transformer models, due to fixed dimensions. "
+            f"Please use a different activation function for {name} decoder.")
 
         kwargs = {
             "config": self.config,

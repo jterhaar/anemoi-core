@@ -25,6 +25,7 @@ from pydantic import PositiveInt
 from pydantic import model_validator
 
 from anemoi.utils.schemas import BaseModel
+from anemoi.training.schemas.schema_utils import DatasetDict
 
 from .decoder import GNNDecoderSchema  # noqa: TC001
 from .decoder import GraphTransformerDecoderSchema  # noqa: TC001
@@ -202,6 +203,33 @@ class DiffusionSchema(BaseModel):
     inference_defaults: dict = Field(default_factory=dict)
     "Default parameters for inference sampling"
 
+EncoderModuleSchema = Annotated[
+    Union[GNNEncoderSchema, GraphTransformerEncoderSchema, TransformerEncoderSchema],
+    Field(discriminator='target_'),
+]
+
+class EncoderSchema(BaseModel):
+    use_encoder: bool = Field(default=True)
+    "Denotes if dataset uses encoder"
+    encoder_module: Optional[EncoderModuleSchema] = Field(None)
+    "Encoder module"
+
+DecoderModuleSchema = Annotated[
+    Union[GNNDecoderSchema, GraphTransformerDecoderSchema, TransformerDecoderSchema],
+    Field(discriminator='target_'),
+]
+
+class DecoderSchema(BaseModel):
+    use_decoder: bool = Field(default=True)
+    "Denotes if dataset uses decoder"
+    decoder_module: Optional[DecoderModuleSchema] = Field(None)
+    "Decoder module"
+
+class ResidualSchema(BaseModel):
+    use_residual: bool = Field(default=True)
+    "Denotes if dataset uses residual connection"
+    residual_module: Optional[ResidualConnectionSchema] = Field(None)
+    "Residual connection module"
 
 class BaseModelSchema(PydanticBaseModel):
     num_channels: NonNegativeInt = Field(example=512)
@@ -229,20 +257,11 @@ class BaseModelSchema(PydanticBaseModel):
         discriminator="target_",
     )
     "GNN processor schema."
-    encoder: Union[GNNEncoderSchema, GraphTransformerEncoderSchema, TransformerEncoderSchema] = Field(
-        ...,
-        discriminator="target_",
-    )
+    encoder: DatasetDict[EncoderSchema]
     "GNN encoder schema."
-    decoder: Union[GNNDecoderSchema, GraphTransformerDecoderSchema, TransformerDecoderSchema] = Field(
-        ...,
-        discriminator="target_",
-    )
+    decoder: DatasetDict[DecoderSchema]
     "GNN decoder schema.",
-    residual: ResidualConnectionSchema = Field(
-        ...,
-        discriminator="target_",
-    )
+    residual: DatasetDict[ResidualSchema]
     "Residual connection schema."
     compile: Optional[list[dict[str, Any]]] = Field(None)
     "Modules to be compiled"
