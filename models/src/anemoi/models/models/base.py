@@ -63,10 +63,7 @@ class BaseGraphModel(nn.Module):
         self.dataset_names = list(data_indices.keys())
 
         model_config = DotDict(model_config)
-        self._graph_names_data = [model_config.graph.data] if isinstance(model_config.graph.data, str) else model_config.graph.data # TODO: should graph.data always be a list in the config?
-        self._graph_name_hidden = (
-            model_config.graph.hidden
-        )
+        self._graph_name_hidden = model_config.model.model.hidden_nodes_name
 
         self.n_step_input = model_config.training.multistep_input
         self.n_step_output = model_config.training.multistep_output
@@ -78,15 +75,15 @@ class BaseGraphModel(nn.Module):
         self.use_encoder = {} 
         self.use_decoder = {}
         self.use_residual = {}
-        for dataset_name in self._graph_names_data:
+        for dataset_name in self.dataset_names:
             self.use_encoder[dataset_name] = model_config.model.encoder.datasets[dataset_name].get("use_encoder", True)
             self.use_decoder[dataset_name] = model_config.model.decoder.datasets[dataset_name].get("use_decoder", True)
             self.use_residual[dataset_name] = model_config.model.residual.datasets[dataset_name].get("use_residual", True)
 
-        self.inputs = [dataset for dataset in self._graph_names_data if len(data_indices[dataset].model.input.includes) != 0]
-        self.outputs = [dataset for dataset in self._graph_names_data if self.use_decoder[dataset] or self.use_residual[dataset]]
+        self.inputs = [dataset for dataset in self.dataset_names if len(data_indices[dataset].model.input.includes) != 0]
+        self.outputs = [dataset for dataset in self.dataset_names if self.use_decoder[dataset] or self.use_residual[dataset]]
         
-        assert self.outputs == self._graph_names_data, "Not supported yet; all datasets must be outputs with use_decoder: True"
+        assert self.outputs == self.dataset_names, "Not supported yet; all datasets must be outputs with use_decoder: True"
 
         trainable_parameters = broadcast_config_keys(
             model_config.model.trainable_parameters,
@@ -144,10 +141,7 @@ class BaseGraphModel(nn.Module):
             self.output_dim[dataset_name] = self._calculate_output_dim(dataset_name)
 
     def _calculate_input_dim(self, dataset_name: str) -> int:
-        return (
-            self.multi_step * self.num_input_channels[dataset_name]
-            + self.node_attributes.attr_ndims[dataset_name]
-        )
+        return self.n_step_input * self.num_input_channels[dataset_name] + self.node_attributes.attr_ndims[dataset_name]
 
     def _calculate_input_dim_latent(self) -> int:
         """Calculate the latent input dimension."""
@@ -245,7 +239,7 @@ class BaseGraphModel(nn.Module):
 
     def _build_residual(self, residual_config: DotDict) -> None:
         self.residual = torch.nn.ModuleDict()
-        for dataset_name in self._graph_names_data:
+        for dataset_name in self.dataset_names:
             if self.use_residual[dataset_name]:
                 self.residual[dataset_name] = instantiate(residual_config.datasets[dataset_name].residual_module, graph=self._graph_data)
                 

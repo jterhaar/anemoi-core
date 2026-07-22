@@ -127,7 +127,15 @@ class AnemoiEnsModelEncProcDec(AnemoiModelEncProcDec):
     ):
         ensemble_size = batch_ens_size // batch_size
         x_out = (
-            einops.rearrange(x_out, "(bs e n) f -> bs e n f", bs=batch_size, e=ensemble_size).to(dtype=dtype).clone()
+            einops.rearrange(
+                x_out,
+                "(bs e n) (time vars) -> bs time e n vars",
+                bs=batch_size,
+                e=ensemble_size,
+                time=self.n_step_output,
+            )
+            .to(dtype=dtype)
+            .clone()
         )
 
         # residual connection (just for the prognostic variables)
@@ -173,18 +181,16 @@ class AnemoiEnsModelEncProcDec(AnemoiModelEncProcDec):
         torch.Tensor
             Output tensor
         """
-        dataset_names = self._graph_names_data
-        
-        # Extract and validate batch & ensemble sizes across datasets
+                # Extract and validate batch & ensemble sizes across datasets
         batch_size = self._get_consistent_dim(x, 0)
         ensemble_size = self._get_consistent_dim(x, 2)
 
         batch_ens_size = batch_size * ensemble_size  # batch and ensemble dimensions are merged
         in_out_sharded = self._resolve_in_out_sharded(
-            dataset_names=dataset_names,
+            dataset_names=self.dataset_names,
             grid_shard_shapes=grid_shard_shapes,
         )
-        for dataset_name in dataset_names:
+        for dataset_name in self.dataset_names:
             self._assert_valid_sharding(batch_size, ensemble_size, in_out_sharded[dataset_name], model_comm_group)
 
         fcstep = min(1, fcstep)
@@ -196,7 +202,7 @@ class AnemoiEnsModelEncProcDec(AnemoiModelEncProcDec):
 
         x_hidden_latent = self.node_attributes(self._graph_name_hidden, batch_size=batch_ens_size)
         shard_shapes_hidden = get_shard_shapes(x_hidden_latent, 0, model_comm_group)
-        for dataset_name in dataset_names:
+        for dataset_name in self.dataset_names:
             x_data_latent, x_skip, shard_shapes_data = self._assemble_input(
                 x[dataset_name],
                 fcstep=fcstep,
@@ -272,7 +278,7 @@ class AnemoiEnsModelEncProcDec(AnemoiModelEncProcDec):
 
 
         x_out_dict = {}
-        for dataset_name in dataset_names:
+        for dataset_name in self.dataset_names:
             if dataset_name in self.outputs: #TODO: loop over self.outputs (consistency assert somewhere?)
                 # Compute decoder edges using updated latent representation
                 decoder_edge_attr, decoder_edge_index, dec_edge_shard_shapes = self.decoder_graph_provider[
