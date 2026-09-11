@@ -92,25 +92,16 @@ class Remapper(BasePreprocessor):
         )
 
         # Create parameter indices for remapping variables
-        for name in name_to_index_training_input:
+        all_names = dict.fromkeys(list(name_to_index_training_input) + list(name_to_index_training_output))
+        for name in all_names:
             method = self.methods.get(name, self.default)
             if method in self.supported_methods:
                 self.remappers.append(self.supported_methods[method][0])
                 self.backmappers.append(self.supported_methods[method][1])
-                self.index_training_input.append(name_to_index_training_input[name])
-                if name in name_to_index_training_output:
-                    self.index_training_out.append(name_to_index_training_output[name])
-                else:
-                    self.index_training_out.append(None)
-                if name in name_to_index_inference_input:
-                    self.index_inference_input.append(name_to_index_inference_input[name])
-                else:
-                    self.index_inference_input.append(None)
-                if name in name_to_index_inference_output:
-                    self.index_inference_output.append(name_to_index_inference_output[name])
-                else:
-                    # this is a forcing variable. It is not in the inference output.
-                    self.index_inference_output.append(None)
+                self.index_training_input.append(name_to_index_training_input.get(name))
+                self.index_training_out.append(name_to_index_training_output.get(name))
+                self.index_inference_input.append(name_to_index_inference_input.get(name))
+                self.index_inference_output.append(name_to_index_inference_output.get(name))
             else:
                 raise KeyError(f"Unknown remapping method for {name}: {method}")
 

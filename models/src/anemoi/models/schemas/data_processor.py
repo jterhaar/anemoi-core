@@ -226,8 +226,14 @@ class ConditionalNaNPostprocessorSchema(BaseModel):
 
 
 class RemapperSchema(BaseModel):
-    default: str = Field(literals=["none", "log1p", "sqrt", "boxcox"])
+    default: str = Field(literals=["none", "log1p", "sqrt", "boxcox"], default="none")
     "Remapper default method to apply."
+    log1p: Union[list[str], None] = Field(default_factory=list)
+    "Variables to remap using log1p."
+    sqrt: Union[list[str], None] = Field(default_factory=list)
+    "Variables to remap using sqrt."
+    boxcox: Union[list[str], None] = Field(default_factory=list)
+    "Variables to remap using boxcox."
     none: Union[list[str], None] = Field(default_factory=list)
     "Variables not to be remapped."
 
